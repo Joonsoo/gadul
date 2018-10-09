@@ -27,6 +27,12 @@
             <version>4.5.2</version>
         </dependency>
 
+        <dependency>
+            <groupId>capstone</groupId>
+            <artifactId>capstone</artifactId>
+            <scope>system</scope>
+            <systemPath>${basedir}/lib/capstone.jar</systemPath>
+        </dependency>
     </dependencies>
 
     <build>

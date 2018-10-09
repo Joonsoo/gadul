@@ -1,5 +1,6 @@
 package com.giyeok.gadul
 
+import capstone.Capstone
 import javafx.application.Application
 import javafx.geometry.Orientation
 import javafx.scene.Scene
@@ -11,6 +12,7 @@ import sun.plugin.dom.exception.InvalidStateException
 import java.io.Closeable
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.*
 
 interface AnnotatableInputStream {
     fun pushContext(description: String)
@@ -123,7 +125,18 @@ abstract class AnnotatedInputStream : AnnotatableInputStream {
             val description: String,
             var value: Any?,
             val coverage: Coverage) {
-        override fun toString(): String = "\"$description\" ($value) @ $coverage"
+
+        fun augmentedValueString(): String =
+                when (value) {
+                    is Byte -> " 0x%x".format(value)
+                    is Short -> " 0x%x".format(value)
+                    is Int -> " 0x%x".format(value)
+                    is Long -> " 0x%x".format(value)
+                    is ByteArray -> Arrays.toString(value as ByteArray)
+                    else -> ""
+                }
+
+        override fun toString(): String = "\"$description\" ($value${augmentedValueString()}}) @ $coverage"
 
         fun toFromRootString(): String {
             val stringBuilder = StringBuilder()
@@ -352,8 +365,20 @@ class HexViewApp : Application() {
         file.seek(0)
         val oneline = ByteArray(16)
         var read = file.read(oneline)
+        val onelineLength = 3 * 16 + 4 + 16
         while (read >= 0) {
-            val onelineText = oneline.slice(0 until read).joinToString(" ") { "%02x".format(it) }
+            val readable = oneline.slice(0 until read).joinToString("") { b ->
+                val v = b.toInt()
+                when (v.toChar()) {
+                    in 'a'..'z' -> "${v.toChar()}"
+                    in 'A'..'Z' -> "${v.toChar()}"
+                    in '0'..'9' -> "${v.toChar()}"
+                    else -> "."
+                }
+            }
+            val onelineText = oneline.slice(0 until read).joinToString(" ") { "%02x".format(it) } +
+                    ("   ".repeat(16 - read)) + "    " + readable
+            assert(onelineText.length == onelineLength)
             lines.add(onelineText)
             read = file.read(oneline)
         }
@@ -364,13 +389,18 @@ class HexViewApp : Application() {
         val infoTextArea = TextArea()
         infoTextArea.font = font
 
-        hexTextArea.selectionProperty().addListener { _, _, newValue ->
-            val line = newValue.start / (16 * 2 + 15 + 1)
-            val col = (newValue.start % (16 * 2 + 15 + 1)) / 3
-            val pos = line * 16 + col
-            val selectedLocation = "$line $col $pos"
+        fun posToLineCol(pos: Long): Pair<Int, Int> {
+            val line = pos / onelineLength
+            val col = (pos % onelineLength) / 3
+            return Pair(line.toInt(), col.toInt())
+        }
 
-            val covered = input.findCoverages(pos.toLong())
+        hexTextArea.selectionProperty().addListener { _, _, newValue ->
+            val (line, col) = posToLineCol(newValue.start.toLong())
+            val pos = (line.toLong() * 16) + col.toLong()
+            val selectedLocation = "$line $col $pos(0x${"%x".format(pos)})"
+
+            val covered = input.findCoverages(pos)
             val coveredString = covered.joinToString("\n") { context ->
                 context.toFromRootString()
             }
@@ -387,7 +417,9 @@ class HexViewApp : Application() {
             selectionInfo.keys.find { it.contains(newValue.start) }?.let { selected ->
                 val pos = selectionInfo[selected]!!.coverage.posSet
                 if (pos.isNotEmpty()) {
-                    hexTextArea.selectRange(pos[0].start.toInt() * 3, pos[0].endInclusive.toInt() * 3 + 2)
+                    val (startLine, startCol) = Pair(pos[0].start / 16, pos[0].start % 16)
+                    val (endLine, endCol) = Pair(pos[0].endInclusive / 16, (pos[0].endInclusive % 16))
+                    hexTextArea.selectRange((startLine * onelineLength + startCol * 3).toInt(), (endLine * onelineLength + endCol * 3 + 2).toInt())
                 }
             }
         }
@@ -407,12 +439,15 @@ class HexViewApp : Application() {
 object Test {
     @JvmStatic
     fun main(args: Array<String>) {
-//    val code = byteArrayOf(0x55, 0x48, 0x8b.toByte(), 0x05, 0xb8.toByte(), 0x13, 0x00, 0x00)
-//    val cs = Capstone(Capstone.CS_ARCH_X86, Capstone.CS_MODE_64)
-//    val insns = cs.disasm(code, 0x1000)
-//    for (insn in insns) {
-//        println(String.format("0x%x:\t%s\t%s", insn.address, insn.mnemonic, insn.opStr))
-//    }
+//        val code = byteArrayOf(
+//                0x31.toByte(), 0xed.toByte(), 0x49.toByte(), 0x89.toByte(), 0xd1.toByte(), 0x5e.toByte(), 0x48.toByte(), 0x89.toByte(), 0xe2.toByte(), 0x48.toByte(), 0x83.toByte(), 0xe4.toByte(), 0xf0.toByte(), 0x50.toByte(), 0x54.toByte(), 0x4c.toByte(),
+//                0x8d.toByte(), 0x05.toByte(), 0x8a.toByte(), 0x01.toByte(), 0x00.toByte(), 0x00.toByte(), 0x48.toByte(), 0x8d.toByte(), 0x0d.toByte(), 0x13.toByte(), 0x01.toByte(), 0x00.toByte(), 0x00.toByte(), 0x48.toByte(), 0x8d.toByte(), 0x3d.toByte(),
+//                0xe6.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0xff.toByte(), 0x15.toByte(), 0x86.toByte(), 0x0a.toByte(), 0x20.toByte(), 0x00.toByte(), 0xf4.toByte(), 0x0f.toByte(), 0x1f.toByte(), 0x44.toByte(), 0x00.toByte(), 0x00.toByte())
+//        val cs = Capstone(Capstone.CS_ARCH_X86, Capstone.CS_MODE_64)
+//        val insns = cs.disasm(code, 0x1000)
+//        for (insn in insns) {
+//            println(String.format("0x%x:\t%s\t%s", insn.address, insn.mnemonic, insn.opStr))
+//        }
 
         Application.launch(HexViewApp::class.java)
         System.exit(0)
