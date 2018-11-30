@@ -325,7 +325,20 @@ class ElfReader {
         input.popContext()
 
         input.seek(e_shoff)
-        fun readSh64(idx: Int) {
+        data class SectionHeader(
+                val index: Int,
+                val sh_name: Int,
+                val sh_type: Int,
+                val sh_flags: Long,
+                val sh_addr: Long,
+                val sh_offset: Long,
+                val sh_size: Long,
+                val sh_link: Int,
+                val sh_info: Int,
+                val sh_addralign: Long,
+                val sh_entsize: Long)
+
+        fun readSh64(idx: Int): SectionHeader {
             input.pushContext("section header $idx")
             val sh_name = input.readInt("sh_name")
             val sh_type = input.readInt("sh_type")
@@ -338,14 +351,86 @@ class ElfReader {
             val sh_addralign = input.readLong("sh_addralign")
             val sh_entsize = input.readLong("sh_entsize")
             input.popContext()
+            return SectionHeader(idx, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
+                    sh_link, sh_info, sh_addralign, sh_entsize)
         }
         input.pushContext("Section Headers")
-        for (i in 0 until e_shnum) {
+        val sections = (0 until e_shnum).map { i ->
             readSh64(i)
         }
-        input.popContext()
+        input.popContext() // ELF HEADER
 
-        input.popContext()
+        fun readSection(header: SectionHeader) {
+            input.seek(sections[e_shstrndx.toInt()].sh_offset + header.sh_name)
+            input.pushContext("Section ${header.index}")
+
+            input.pushContext("name")
+            val nameStringBuilder = StringBuilder()
+            var c = input.read()
+            while (c.toInt() != 0) {
+                nameStringBuilder.append(c.toChar())
+                c = input.read()
+            }
+            val sectionName = nameStringBuilder.toString()
+            input.setStringValue(sectionName)
+            input.popContext() // name
+
+            when (header.sh_type) {
+                2 -> {// symbol table
+                    input.pushContext("Symbol table")
+                    input.seek(header.sh_offset)
+                    for (i in 0 until (header.sh_size / header.sh_entsize)) {
+                        input.pushContext("Symbol $i")
+
+                        val st_name = input.readInt("st_name")
+                        val st_info = input.readByte("st_info")
+                        val st_other = input.readByte("st_other")
+                        val st_shndx = input.readShort("st_shndx")
+                        val st_value = input.readLong("st_value")
+                        val st_size = input.readLong("st_size")
+
+                        input.popContext()
+                    }
+                    println(header.sh_offset + header.sh_size)
+                    println(input.pos())
+                    input.popContext()
+                }
+                else ->
+                    when (sectionName) {
+                        ".text" -> {
+                            input.pushContext("body")
+
+                            input.seek(header.sh_offset)
+                            val bytes = ByteArray(header.sh_size.toInt())
+                            input.readFully(bytes)
+
+                            val cs = Capstone(Capstone.CS_ARCH_X86, Capstone.CS_MODE_64)
+                            val insns = cs.disasm(bytes, header.sh_addr)
+                            val disassembleText = insns.joinToString(";") { insn ->
+                                (String.format("0x%x:\t%s\t%s", insn.address, insn.mnemonic, insn.opStr))
+                            }
+                            input.setStringValue(disassembleText)
+
+                            input.popContext()
+                        }
+                        ".rela.dyn", "rela.plt" -> {
+                            input.pushContext("relocations")
+
+                            input.popContext()
+                        }
+                        else -> {
+                            input.seek(header.sh_offset)
+                            val bytes = ByteArray(header.sh_size.toInt())
+                            input.readFully(bytes, "body")
+                        }
+                    }
+            }
+
+            input.popContext() // Section
+        }
+        sections.forEach { readSection(it) }
+
+        input.popContext() // ELF FILE
     }
 }
 
@@ -439,17 +524,14 @@ class HexViewApp : Application() {
 object Test {
     @JvmStatic
     fun main(args: Array<String>) {
-//        val code = byteArrayOf(
-//                0x31.toByte(), 0xed.toByte(), 0x49.toByte(), 0x89.toByte(), 0xd1.toByte(), 0x5e.toByte(), 0x48.toByte(), 0x89.toByte(), 0xe2.toByte(), 0x48.toByte(), 0x83.toByte(), 0xe4.toByte(), 0xf0.toByte(), 0x50.toByte(), 0x54.toByte(), 0x4c.toByte(),
-//                0x8d.toByte(), 0x05.toByte(), 0x8a.toByte(), 0x01.toByte(), 0x00.toByte(), 0x00.toByte(), 0x48.toByte(), 0x8d.toByte(), 0x0d.toByte(), 0x13.toByte(), 0x01.toByte(), 0x00.toByte(), 0x00.toByte(), 0x48.toByte(), 0x8d.toByte(), 0x3d.toByte(),
-//                0xe6.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0xff.toByte(), 0x15.toByte(), 0x86.toByte(), 0x0a.toByte(), 0x20.toByte(), 0x00.toByte(), 0xf4.toByte(), 0x0f.toByte(), 0x1f.toByte(), 0x44.toByte(), 0x00.toByte(), 0x00.toByte())
-//        val cs = Capstone(Capstone.CS_ARCH_X86, Capstone.CS_MODE_64)
-//        val insns = cs.disasm(code, 0x1000)
-//        for (insn in insns) {
-//            println(String.format("0x%x:\t%s\t%s", insn.address, insn.mnemonic, insn.opStr))
-//        }
+        val code = byteArrayOf(0xff.toByte(), 0x25.toByte(), 0xba.toByte(), 0x0a.toByte(), 0x20.toByte(), 0x00.toByte(), 0x68.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0xe9.toByte(), 0xe0.toByte(), 0xff.toByte(), 0xff.toByte(), 0xff.toByte())
+        val cs = Capstone(Capstone.CS_ARCH_X86, Capstone.CS_MODE_64)
+        val insns = cs.disasm(code, 0x1000)
+        for (insn in insns) {
+            println(String.format("0x%x:\t%s\t%s", insn.address, insn.mnemonic, insn.opStr))
+        }
 
-        Application.launch(HexViewApp::class.java)
-        System.exit(0)
+//        Application.launch(HexViewApp::class.java)
+//        System.exit(0)
     }
 }
